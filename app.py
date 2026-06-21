@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from io import BytesIO
+from matplotlib.backends.backend_pdf import PdfPages
+from textwrap import fill
 
 from scipy.stats import shapiro, levene
 import statsmodels.api as sm
@@ -27,26 +29,36 @@ st.markdown(
     - Teste de normalidade de Shapiro-Wilk;
     - Teste de homogeneidade de variâncias de Levene;
     - Gráfico dos intervalos de confiança de 95%;
-    - Exportação dos resultados em Excel, PNG e PDF.
+    - Exportação dos resultados em Excel, PDF e PNG.
     """
 )
 
 
 PRECISAO_SAIDA = 4
+PRECISAO_ANOVA = 5
 DPI_PNG = 600
-TAMANHO_FIGURA = (9, 5.5)
 FIGSIZE_WIDTH = 9
 FIGSIZE_HEIGHT = 5.5
 
 
-def limpar_dados(df, coluna_grupo, coluna_resposta):
+def formatar_p_valor(p):
+    if pd.isna(p):
+        return ""
 
+    if p == 0:
+        return "< 0.001"
+
+    if p < 0.001:
+        return f"{p:.2E}"
+
+    return round(p, PRECISAO_SAIDA)
+
+
+def limpar_dados(df, coluna_grupo, coluna_resposta):
     dados = df[[coluna_grupo, coluna_resposta]].copy()
     dados.columns = ["Grupo", "Resultado"]
 
-
     dados["Grupo"] = dados["Grupo"].astype(str).str.strip()
-
 
     dados["Resultado"] = (
         dados["Resultado"]
@@ -55,12 +67,9 @@ def limpar_dados(df, coluna_grupo, coluna_resposta):
         .str.strip()
     )
 
-
     dados["Resultado"] = pd.to_numeric(dados["Resultado"], errors="coerce")
 
-
     dados = dados.dropna(subset=["Grupo", "Resultado"])
-
 
     dados = dados[
         (dados["Grupo"] != "") &
@@ -70,23 +79,7 @@ def limpar_dados(df, coluna_grupo, coluna_resposta):
     return dados
 
 
-def ler_planilha(arquivo):
-
-
-    try:
-        if arquivo.name.endswith(".csv"):
-            df = pd.read_csv(arquivo)
-            return df, None, None
-        else:
-            xls = pd.ExcelFile(arquivo)
-            return xls, None, xls.sheet_names
-    except Exception as e:
-        raise ValueError(f"Erro ao ler arquivo: {str(e)}")
-
-
 def selecionar_aba_excel(arquivo):
-
-
     xls = pd.ExcelFile(arquivo)
     aba = st.sidebar.selectbox("Escolha a aba da planilha", xls.sheet_names)
     df = pd.read_excel(arquivo, sheet_name=aba)
@@ -94,28 +87,37 @@ def selecionar_aba_excel(arquivo):
 
 
 def calcular_estatistica_descritiva(dados):
-
-
     descritiva = dados.groupby("Grupo")["Resultado"].agg(
         N="count",
         Média="mean",
         Desvio_Padrão="std",
-        Erro_Padrão=lambda x: x.std() / np.sqrt(len(x))
+        Erro_Padrão=lambda x: x.std() / np.sqrt(len(x)),
+        Mínimo="min",
+        Máximo="max"
     ).reset_index()
 
+    descritiva["CV (%)"] = (
+        descritiva["Desvio_Padrão"] / descritiva["Média"] * 100
+    )
 
-    for col in ["Média", "Desvio_Padrão", "Erro_Padrão"]:
-        descritiva[col] = descritiva[col].round(PRECISAO_SAIDA)
+    colunas_numericas = [
+        "Média",
+        "Desvio_Padrão",
+        "Erro_Padrão",
+        "Mínimo",
+        "Máximo",
+        "CV (%)"
+    ]
+
+    for coluna in colunas_numericas:
+        descritiva[coluna] = descritiva[coluna].round(PRECISAO_SAIDA)
 
     return descritiva
 
 
 def executar_anova(dados):
-
-
     modelo = ols("Resultado ~ C(Grupo)", data=dados).fit()
     anova = sm.stats.anova_lm(modelo, typ=2)
-
 
     sq_fator = anova.loc["C(Grupo)", "sum_sq"]
     gl_fator = anova.loc["C(Grupo)", "df"]
@@ -127,22 +129,31 @@ def executar_anova(dados):
     gl_residuos = anova.loc["Residual", "df"]
     mq_residuos = sq_residuos / gl_residuos
 
-
     anova_formatada = pd.DataFrame({
         "Fonte": ["Fator", "Resíduos"],
         "G.L.": [int(gl_fator), int(gl_residuos)],
-        "SQ": [round(sq_fator, PRECISAO_SAIDA), round(sq_residuos, PRECISAO_SAIDA)],
-        "MQ": [round(mq_fator, PRECISAO_SAIDA), round(mq_residuos, PRECISAO_SAIDA)],
-        "F": [round(f_valor, PRECISAO_SAIDA), ""],
-        "P. valor": [round(p_valor, PRECISAO_SAIDA), ""]
+        "SQ": [
+            f"{sq_fator:.5f}",
+            f"{sq_residuos:.5f}"
+        ],
+        "MQ": [
+            f"{mq_fator:.5f}",
+            f"{mq_residuos:.5f}"
+        ],
+        "F": [
+            f"{f_valor:.5f}",
+            ""
+        ],
+        "P. valor": [
+            formatar_p_valor(p_valor),
+            ""
+        ]
     })
 
-    return modelo, anova_formatada, (f_valor, p_valor)
+    return modelo, anova_formatada, f_valor, p_valor
 
 
 def avaliar_pressupostos(modelo, dados, alpha):
-
-
     residuos = modelo.resid
 
     if len(residuos) >= 3:
@@ -150,13 +161,12 @@ def avaliar_pressupostos(modelo, dados, alpha):
     else:
         shapiro_stat, shapiro_p = np.nan, np.nan
 
-
     grupos = [
         grupo["Resultado"].values
-        for nome, grupo in dados.groupby("Grupo")
+        for _, grupo in dados.groupby("Grupo")
     ]
-    levene_stat, levene_p = levene(*grupos)
 
+    levene_stat, levene_p = levene(*grupos)
 
     if not np.isnan(shapiro_p):
         interpretacao_shapiro = (
@@ -180,8 +190,8 @@ def avaliar_pressupostos(modelo, dados, alpha):
             round(levene_stat, PRECISAO_SAIDA)
         ],
         "p-valor": [
-            round(shapiro_p, PRECISAO_SAIDA) if not np.isnan(shapiro_p) else "",
-            round(levene_p, PRECISAO_SAIDA)
+            formatar_p_valor(shapiro_p) if not np.isnan(shapiro_p) else "",
+            formatar_p_valor(levene_p)
         ],
         "Interpretação": [
             interpretacao_shapiro,
@@ -192,84 +202,92 @@ def avaliar_pressupostos(modelo, dados, alpha):
     return pressupostos
 
 
-def padronizar_tukey_por_ordem(tukey_df, ordem_grupos):
+def inverter_comparacao(diff, lower, upper):
+    diff_final = -diff
+    lower_final = -upper
+    upper_final = -lower
+    return diff_final, lower_final, upper_final
 
 
+def padronizar_tukey_por_referencia(tukey_df, ordem_grupos, grupo_referencia):
     ordem = {grupo: i for i, grupo in enumerate(ordem_grupos)}
-
     linhas = []
 
     for _, row in tukey_df.iterrows():
-        g1_original = str(row["Grupo 1"]).strip()
-        g2_original = str(row["Grupo 2"]).strip()
+        g1 = str(row["Grupo 1"]).strip()
+        g2 = str(row["Grupo 2"]).strip()
 
-        diff_original = float(row["Diferença média"])
-        lower_original = float(row["IC 95% inferior"])
-        upper_original = float(row["IC 95% superior"])
+        diff = float(row["Diferença média"])
+        lower = float(row["IC 95% inferior"])
+        upper = float(row["IC 95% superior"])
 
         pvalor = row["p-ajustado"]
         significativo = row["Significativo"]
 
+        idx_g1 = ordem.get(g1, 999)
+        idx_g2 = ordem.get(g2, 999)
 
-        if g1_original in ordem and g2_original in ordem:
-            idx_g1 = ordem[g1_original]
-            idx_g2 = ordem[g2_original]
+        if g1 == grupo_referencia and g2 != grupo_referencia:
+            grupo_base = g1
+            grupo_comparado = g2
+            diff_final = diff
+            lower_final = lower
+            upper_final = upper
+            prioridade = 0
+            ordem_base = idx_g2
 
-
-            if idx_g1 > idx_g2:
-
-                grupo_maior = g1_original
-                grupo_menor = g2_original
-                diff_final = diff_original
-                lower_final = lower_original
-                upper_final = upper_original
-                idx_maior = idx_g1
-                idx_menor = idx_g2
-            else:
-
-
-                grupo_maior = g2_original
-                grupo_menor = g1_original
-                diff_final = -diff_original
-                lower_final = -upper_original
-                upper_final = -lower_original
-                idx_maior = idx_g2
-                idx_menor = idx_g1
+        elif g2 == grupo_referencia and g1 != grupo_referencia:
+            grupo_base = g2
+            grupo_comparado = g1
+            diff_final, lower_final, upper_final = inverter_comparacao(
+                diff,
+                lower,
+                upper
+            )
+            prioridade = 0
+            ordem_base = idx_g1
 
         else:
+            if idx_g2 > idx_g1:
+                grupo_base = g1
+                grupo_comparado = g2
+                diff_final = diff
+                lower_final = lower
+                upper_final = upper
+                ordem_base = idx_g2
+            else:
+                grupo_base = g2
+                grupo_comparado = g1
+                diff_final, lower_final, upper_final = inverter_comparacao(
+                    diff,
+                    lower,
+                    upper
+                )
+                ordem_base = idx_g1
 
-            grupo_maior = g1_original
-            grupo_menor = g2_original
-            diff_final = diff_original
-            lower_final = lower_original
-            upper_final = upper_original
-            idx_maior = 999
-            idx_menor = 999
+            prioridade = 1
 
-
-        comparacao = f"{grupo_maior} - {grupo_menor}"
+        comparacao = f"{grupo_comparado} - {grupo_base}"
 
         linhas.append({
             "Comparação": comparacao,
-            "Grupo 1": grupo_menor,
-            "Grupo 2": grupo_maior,
+            "Grupo 1": grupo_base,
+            "Grupo 2": grupo_comparado,
             "Diferença média": diff_final,
             "IC 95% inferior": lower_final,
             "IC 95% superior": upper_final,
             "p-ajustado": pvalor,
             "Significativo": significativo,
-            "idx_maior": idx_maior,
-            "idx_menor": idx_menor
+            "Prioridade": prioridade,
+            "Ordem": ordem_base
         })
 
     tukey_padronizado = pd.DataFrame(linhas)
 
-
     tukey_padronizado = tukey_padronizado.sort_values(
-        by=["idx_maior", "idx_menor"],
-        ascending=[False, False]
+        by=["Prioridade", "Ordem"],
+        ascending=[True, True]
     ).reset_index(drop=True)
-
 
     tukey_padronizado = tukey_padronizado[
         [
@@ -284,30 +302,36 @@ def padronizar_tukey_por_ordem(tukey_df, ordem_grupos):
         ]
     ]
 
+    tukey_padronizado["Diferença média"] = (
+        tukey_padronizado["Diferença média"].round(PRECISAO_SAIDA)
+    )
 
-    tukey_padronizado["Diferença média"] = tukey_padronizado["Diferença média"].round(PRECISAO_SAIDA)
-    tukey_padronizado["IC 95% inferior"] = tukey_padronizado["IC 95% inferior"].round(PRECISAO_SAIDA)
-    tukey_padronizado["IC 95% superior"] = tukey_padronizado["IC 95% superior"].round(PRECISAO_SAIDA)
-    tukey_padronizado["p-ajustado"] = tukey_padronizado["p-ajustado"].round(PRECISAO_SAIDA)
+    tukey_padronizado["IC 95% inferior"] = (
+        tukey_padronizado["IC 95% inferior"].round(PRECISAO_SAIDA)
+    )
+
+    tukey_padronizado["IC 95% superior"] = (
+        tukey_padronizado["IC 95% superior"].round(PRECISAO_SAIDA)
+    )
+
+    tukey_padronizado["p-ajustado"] = (
+        tukey_padronizado["p-ajustado"].apply(formatar_p_valor)
+    )
 
     return tukey_padronizado
 
 
-def executar_tukey(dados, alpha, ordem_grupos):
-
-
+def executar_tukey(dados, alpha, ordem_grupos, grupo_referencia):
     tukey = pairwise_tukeyhsd(
         endog=dados["Resultado"],
         groups=dados["Grupo"],
         alpha=alpha
     )
 
-
     tukey_df = pd.DataFrame(
         data=tukey._results_table.data[1:],
         columns=tukey._results_table.data[0]
     )
-
 
     tukey_df = tukey_df.rename(columns={
         "group1": "Grupo 1",
@@ -319,22 +343,24 @@ def executar_tukey(dados, alpha, ordem_grupos):
         "reject": "Significativo"
     })
 
-
-    tukey_df = padronizar_tukey_por_ordem(tukey_df, ordem_grupos)
+    tukey_df = padronizar_tukey_por_referencia(
+        tukey_df,
+        ordem_grupos,
+        grupo_referencia
+    )
 
     return tukey_df
 
 
-def gerar_grafico_tukey(tukey_df, nome_ensaio, unidade):
-
-
+def gerar_grafico_tukey(tukey_df, nome_ensaio, unidade, grupo_referencia):
     tukey_plot = tukey_df.copy().reset_index(drop=True)
 
+    for col in ["Diferença média", "IC 95% inferior", "IC 95% superior"]:
+        tukey_plot[col] = pd.to_numeric(tukey_plot[col], errors="coerce")
 
     y_pos = np.arange(len(tukey_plot))
 
     fig, ax = plt.subplots(figsize=(FIGSIZE_WIDTH, FIGSIZE_HEIGHT))
-
 
     ax.errorbar(
         x=tukey_plot["Diferença média"],
@@ -344,22 +370,27 @@ def gerar_grafico_tukey(tukey_df, nome_ensaio, unidade):
             tukey_plot["IC 95% superior"] - tukey_plot["Diferença média"]
         ],
         fmt="o",
+        ecolor="steelblue",
+        color="black",
+        markerfacecolor="black",
+        markeredgecolor="black",
         capsize=5,
-        linewidth=1.8,
-        markersize=5
+        linewidth=1.4,
+        markersize=4
     )
-
 
     ax.axvline(
         x=0,
+        color="red",
         linestyle="--",
-        linewidth=1.2
+        linewidth=1.2,
+        alpha=0.75
     )
 
+    n_ref = tukey_plot["Comparação"].str.contains(grupo_referencia, regex=False).sum()
 
     ax.set_yticks(y_pos)
     ax.set_yticklabels(tukey_plot["Comparação"])
-
 
     ax.set_title(
         "Intervalos de confiança de 95% - Tukey",
@@ -370,56 +401,15 @@ def gerar_grafico_tukey(tukey_df, nome_ensaio, unidade):
     ax.set_xlabel(f"Diferença média - {nome_ensaio} ({unidade})")
     ax.set_ylabel("Comparações entre grupos")
 
-
     ax.grid(True, axis="x", alpha=0.30)
     ax.grid(True, axis="y", alpha=0.15)
-
-
-    ax.invert_yaxis()
 
     fig.tight_layout()
 
     return fig
 
 
-def gerar_excel(dados_brutos, descritiva, anova_formatada, pressupostos, tukey_df, interpretacao):
-
-
-    output = BytesIO()
-
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        dados_brutos.to_excel(writer, sheet_name="Dados usados", index=False)
-        descritiva.to_excel(writer, sheet_name="Descritiva", index=False)
-        anova_formatada.to_excel(writer, sheet_name="ANOVA", index=False)
-        pressupostos.to_excel(writer, sheet_name="Pressupostos", index=False)
-        tukey_df.to_excel(writer, sheet_name="Tukey", index=False)
-        interpretacao.to_excel(writer, sheet_name="Interpretacao", index=False)
-
-    output.seek(0)
-    return output
-
-
-def converter_figura_para_png(fig):
-
-
-    output = BytesIO()
-    fig.savefig(output, format="png", dpi=DPI_PNG, bbox_inches="tight")
-    output.seek(0)
-    return output
-
-
-def converter_figura_para_pdf(fig):
-
-
-    output = BytesIO()
-    fig.savefig(output, format="pdf", bbox_inches="tight")
-    output.seek(0)
-    return output
-
-
 def gerar_interpretacao_automatica(p_valor, tukey_df, alpha, nome_ensaio):
-
-
     if p_valor < alpha:
         texto_anova = (
             f"A ANOVA indicou diferença estatisticamente significativa "
@@ -430,7 +420,6 @@ def gerar_interpretacao_automatica(p_valor, tukey_df, alpha, nome_ensaio):
             f"A ANOVA não indicou diferença estatisticamente significativa "
             f"entre os grupos para {nome_ensaio}, considerando α = {alpha}."
         )
-
 
     comparacoes_significativas = tukey_df[tukey_df["Significativo"] == True]
 
@@ -453,6 +442,339 @@ def gerar_interpretacao_automatica(p_valor, tukey_df, alpha, nome_ensaio):
     return interpretacao, texto_anova, texto_tukey
 
 
+def escrever_tabela_excel(worksheet, workbook, titulo, df_tabela, linha_inicial):
+    formato_secao = workbook.add_format({
+        "bold": True,
+        "font_size": 12,
+        "bg_color": "#D9EAF7",
+        "border": 1
+    })
+
+    formato_cabecalho = workbook.add_format({
+        "bold": True,
+        "bg_color": "#EDEDED",
+        "border": 1,
+        "align": "center",
+        "valign": "vcenter"
+    })
+
+    formato_texto = workbook.add_format({
+        "border": 1,
+        "valign": "top"
+    })
+
+    formato_numero = workbook.add_format({
+        "border": 1,
+        "num_format": "0.00000",
+        "valign": "top"
+    })
+
+    ultima_coluna = max(len(df_tabela.columns) - 1, 1)
+
+    worksheet.merge_range(
+        linha_inicial,
+        0,
+        linha_inicial,
+        ultima_coluna,
+        titulo,
+        formato_secao
+    )
+
+    linha_tabela = linha_inicial + 1
+
+    for col_idx, col_nome in enumerate(df_tabela.columns):
+        worksheet.write(linha_tabela, col_idx, col_nome, formato_cabecalho)
+
+    for row_idx, (_, row) in enumerate(df_tabela.iterrows(), start=linha_tabela + 1):
+        for col_idx, valor in enumerate(row):
+            if isinstance(valor, (int, float, np.integer, np.floating)) and not pd.isna(valor):
+                worksheet.write(row_idx, col_idx, valor, formato_numero)
+            else:
+                worksheet.write(row_idx, col_idx, valor, formato_texto)
+
+    return linha_tabela + len(df_tabela) + 3
+
+
+def gerar_excel_relatorio(
+    dados,
+    descritiva,
+    anova_formatada,
+    pressupostos,
+    tukey_df,
+    interpretacao,
+    fig,
+    nome_ensaio
+):
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+
+        sheet_relatorio = "Relatorio"
+        worksheet = workbook.add_worksheet(sheet_relatorio)
+        writer.sheets[sheet_relatorio] = worksheet
+
+        formato_titulo = workbook.add_format({
+            "bold": True,
+            "font_size": 16,
+            "align": "center",
+            "valign": "vcenter"
+        })
+
+        formato_obs = workbook.add_format({
+            "italic": True,
+            "font_size": 10
+        })
+
+        worksheet.set_column("A:A", 24)
+        worksheet.set_column("B:B", 20)
+        worksheet.set_column("C:C", 20)
+        worksheet.set_column("D:D", 20)
+        worksheet.set_column("E:E", 20)
+        worksheet.set_column("F:F", 20)
+        worksheet.set_column("G:G", 20)
+        worksheet.set_column("H:H", 20)
+
+        linha = 0
+
+        worksheet.merge_range(
+            linha,
+            0,
+            linha,
+            7,
+            f"Relatório estatístico - {nome_ensaio}",
+            formato_titulo
+        )
+
+        linha += 2
+
+        linha = escrever_tabela_excel(
+            worksheet,
+            workbook,
+            "1. Dados usados na análise",
+            dados,
+            linha
+        )
+
+        linha = escrever_tabela_excel(
+            worksheet,
+            workbook,
+            "2. Estatística descritiva",
+            descritiva,
+            linha
+        )
+
+        linha = escrever_tabela_excel(
+            worksheet,
+            workbook,
+            "3. Tabela da ANOVA",
+            anova_formatada,
+            linha
+        )
+
+        worksheet.write(linha, 0, "Onde:", formato_obs)
+        worksheet.write(
+            linha + 1,
+            0,
+            "G.L. = graus de liberdade; SQ = soma dos quadrados; MQ = média quadrática; F = razão entre as médias quadráticas.",
+            formato_obs
+        )
+
+        linha += 4
+
+        linha = escrever_tabela_excel(
+            worksheet,
+            workbook,
+            "4. Testes de pressupostos",
+            pressupostos,
+            linha
+        )
+
+        linha = escrever_tabela_excel(
+            worksheet,
+            workbook,
+            "5. Teste post hoc de Tukey",
+            tukey_df,
+            linha
+        )
+
+        linha = escrever_tabela_excel(
+            worksheet,
+            workbook,
+            "6. Interpretação automática",
+            interpretacao,
+            linha
+        )
+
+        sheet_grafico = "Grafico Tukey"
+        worksheet_grafico = workbook.add_worksheet(sheet_grafico)
+        writer.sheets[sheet_grafico] = worksheet_grafico
+
+        formato_titulo_grafico = workbook.add_format({
+            "bold": True,
+            "font_size": 14,
+            "align": "center",
+            "valign": "vcenter"
+        })
+
+        worksheet_grafico.set_column("A:A", 20)
+        worksheet_grafico.set_column("B:B", 20)
+        worksheet_grafico.set_column("C:C", 20)
+        worksheet_grafico.set_column("D:D", 20)
+        worksheet_grafico.set_column("E:E", 20)
+
+        worksheet_grafico.merge_range(
+            0,
+            0,
+            0,
+            5,
+            f"Gráfico de Tukey - {nome_ensaio}",
+            formato_titulo_grafico
+        )
+
+        imagem_grafico = BytesIO()
+        fig.savefig(
+            imagem_grafico,
+            format="png",
+            dpi=DPI_PNG,
+            bbox_inches="tight"
+        )
+        imagem_grafico.seek(0)
+
+        worksheet_grafico.insert_image(
+            2,
+            0,
+            "grafico_tukey.png",
+            {
+                "image_data": imagem_grafico,
+                "x_scale": 0.95,
+                "y_scale": 0.95
+            }
+        )
+
+    output.seek(0)
+    return output
+
+
+def adicionar_tabela_pdf(pdf, titulo, df_tabela):
+    df_texto = df_tabela.copy()
+
+    for col in df_texto.columns:
+        df_texto[col] = df_texto[col].astype(str).apply(lambda x: fill(x, width=35))
+
+    fig, ax = plt.subplots(figsize=(11.69, 8.27))
+    ax.axis("off")
+
+    ax.text(
+        0.5,
+        0.95,
+        titulo,
+        ha="center",
+        va="top",
+        fontsize=14,
+        fontweight="bold",
+        transform=ax.transAxes
+    )
+
+    tabela = ax.table(
+        cellText=df_texto.values,
+        colLabels=df_texto.columns,
+        loc="center",
+        cellLoc="center"
+    )
+
+    tabela.auto_set_font_size(False)
+    tabela.set_fontsize(8)
+    tabela.scale(1, 1.4)
+
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
+
+
+def adicionar_texto_pdf(pdf, titulo, textos):
+    fig, ax = plt.subplots(figsize=(11.69, 8.27))
+    ax.axis("off")
+
+    ax.text(
+        0.5,
+        0.95,
+        titulo,
+        ha="center",
+        va="top",
+        fontsize=14,
+        fontweight="bold",
+        transform=ax.transAxes
+    )
+
+    y = 0.82
+
+    for texto in textos:
+        ax.text(
+            0.08,
+            y,
+            fill(texto, width=120),
+            ha="left",
+            va="top",
+            fontsize=11,
+            transform=ax.transAxes
+        )
+        y -= 0.12
+
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
+
+
+def gerar_pdf_relatorio(
+    dados,
+    descritiva,
+    anova_formatada,
+    pressupostos,
+    tukey_df,
+    interpretacao,
+    fig_grafico,
+    nome_ensaio
+):
+    output = BytesIO()
+
+    with PdfPages(output) as pdf:
+        adicionar_texto_pdf(
+            pdf,
+            f"Relatório estatístico - {nome_ensaio}",
+            [
+                "Relatório gerado automaticamente pelo aplicativo ANOVA e Tukey Lab.",
+                "A análise inclui estatística descritiva, ANOVA de uma via, testes de pressupostos, teste post hoc de Tukey e gráfico dos intervalos de confiança de 95%."
+            ]
+        )
+
+        adicionar_tabela_pdf(pdf, "1. Dados usados na análise", dados)
+        adicionar_tabela_pdf(pdf, "2. Estatística descritiva", descritiva)
+        adicionar_tabela_pdf(pdf, "3. Tabela da ANOVA", anova_formatada)
+
+        adicionar_texto_pdf(
+            pdf,
+            "Observação sobre a ANOVA",
+            [
+                "G.L. = graus de liberdade; SQ = soma dos quadrados; MQ = média quadrática; F = razão entre as médias quadráticas."
+            ]
+        )
+
+        adicionar_tabela_pdf(pdf, "4. Testes de pressupostos", pressupostos)
+        adicionar_tabela_pdf(pdf, "5. Teste post hoc de Tukey", tukey_df)
+        adicionar_tabela_pdf(pdf, "6. Interpretação automática", interpretacao)
+
+        pdf.savefig(fig_grafico, bbox_inches="tight")
+
+    output.seek(0)
+    return output
+
+
+def converter_figura_para_png(fig):
+    output = BytesIO()
+    fig.savefig(output, format="png", dpi=DPI_PNG, bbox_inches="tight")
+    output.seek(0)
+    return output
+
+
 st.sidebar.header("1. Enviar planilha")
 
 arquivo = st.sidebar.file_uploader(
@@ -469,28 +791,27 @@ if arquivo is None:
         """
         ### Modelo esperado da planilha
 
-        | Traco | CP | Flexao_MPa |
+        | Traco | CP | Resultado |
         |---|---:|---:|
-        | T-REF | 4 | 6,26 |
-        | T-REF | 5 | 7,01 |
-        | T-REF | 6 | 7,67 |
-        | T-0,4 | 4 | 8,93 |
-        | T-0,4 | 5 | 7,91 |
-        | T-0,4 | 6 | 7,21 |
+        | T-REF | 1 | 29,72191 |
+        | T-REF | 2 | 29,50426 |
+        | T-REF | 3 | 28,99514 |
+        | T-0,4 | 1 | 26,35254 |
+        | T-0,4 | 2 | 24,22243 |
+        | T-0,4 | 3 | 25,86113 |
 
         No app, escolha:
 
         - **Coluna dos grupos:** `Traco`
-        - **Coluna dos valores numéricos:** `Flexao_MPa`
+        - **Coluna dos valores numéricos:** a coluna do ensaio, por exemplo `Modulo_MPa`
         """
     )
 
 else:
 
-
     try:
         if arquivo.name.endswith(".csv"):
-            df = pd.read_csv(arquivo)
+            df = pd.read_csv(arquivo, sep=None, engine="python")
         else:
             df = selecionar_aba_excel(arquivo)
 
@@ -501,7 +822,6 @@ else:
 
     st.subheader("Pré-visualização da planilha")
     st.dataframe(df)
-
 
     st.sidebar.header("2. Configurar análise")
 
@@ -517,12 +837,12 @@ else:
 
     nome_ensaio = st.sidebar.text_input(
         "Nome do ensaio",
-        value="Resistência à tração na flexão aos 28 dias"
+        value="Módulo de elasticidade aos 28 dias"
     )
 
     unidade = st.sidebar.text_input(
         "Unidade",
-        value="MPa"
+        value="GPa"
     )
 
     alpha = st.sidebar.selectbox(
@@ -542,15 +862,22 @@ else:
         if grupo.strip() != ""
     ]
 
+    if len(ordem_grupos) == 0:
+        st.sidebar.error("Informe pelo menos um grupo na ordem dos grupos.")
+        st.stop()
+
+    grupo_referencia = ordem_grupos[0]
+
+    st.sidebar.caption(
+        f"Grupo de referência automático no Tukey: {grupo_referencia}"
+    )
+
     rodar = st.sidebar.button("Rodar análise")
 
     if rodar:
 
         try:
-
-
             dados = limpar_dados(df, coluna_grupo, coluna_resposta)
-
 
             if dados.empty:
                 st.error(
@@ -566,7 +893,6 @@ else:
                 )
                 st.stop()
 
-
             contagem_grupos = dados.groupby("Grupo")["Resultado"].count()
 
             if (contagem_grupos < 2).any():
@@ -575,8 +901,8 @@ else:
                     "O ideal para ANOVA/Tukey é ter replicatas por grupo."
                 )
 
-
             grupos_na_planilha = list(dados["Grupo"].unique())
+
             grupos_fora_da_ordem = [
                 grupo for grupo in grupos_na_planilha
                 if grupo not in ordem_grupos
@@ -586,9 +912,14 @@ else:
                 st.warning(
                     "Atenção: alguns grupos da planilha não estão na ordem definida para o Tukey: "
                     + ", ".join(grupos_fora_da_ordem)
-                    + ". Eles serão mantidos, mas a ordenação pode não ficar igual ao MATLAB."
+                    + ". Eles serão mantidos, mas a ordenação pode não ficar igual ao esperado."
                 )
 
+            if grupo_referencia not in dados["Grupo"].unique():
+                st.warning(
+                    f"O grupo de referência automático '{grupo_referencia}' não foi encontrado nos dados. "
+                    "Confira a grafia da ordem dos grupos e da coluna de grupos."
+                )
 
             st.subheader("Dados usados na análise após limpeza")
             st.dataframe(dados)
@@ -596,23 +927,25 @@ else:
             st.subheader("Número de valores por grupo")
             st.dataframe(contagem_grupos.reset_index(name="N"))
 
-
             descritiva = calcular_estatistica_descritiva(dados)
 
-
-            modelo, anova_formatada, (f_valor, p_valor) = executar_anova(dados)
-
+            modelo, anova_formatada, f_valor, p_valor = executar_anova(dados)
 
             pressupostos = avaliar_pressupostos(modelo, dados, alpha)
 
-
-            tukey_df = executar_tukey(dados, alpha, ordem_grupos)
-
-
-            interpretacao, texto_anova, texto_tukey = gerar_interpretacao_automatica(
-                p_valor, tukey_df, alpha, nome_ensaio
+            tukey_df = executar_tukey(
+                dados,
+                alpha,
+                ordem_grupos,
+                grupo_referencia
             )
 
+            interpretacao, texto_anova, texto_tukey = gerar_interpretacao_automatica(
+                p_valor,
+                tukey_df,
+                alpha,
+                nome_ensaio
+            )
 
             st.success("Análise concluída com sucesso!")
 
@@ -629,25 +962,41 @@ else:
             st.dataframe(tukey_df)
 
             st.subheader("Gráfico de Tukey")
-            fig = gerar_grafico_tukey(tukey_df, nome_ensaio, unidade)
+            fig = gerar_grafico_tukey(
+                tukey_df,
+                nome_ensaio,
+                unidade,
+                grupo_referencia
+            )
             st.pyplot(fig)
 
             st.subheader("Interpretação automática")
             st.write(texto_anova)
             st.write(texto_tukey)
 
-
-            excel_file = gerar_excel(
+            excel_file = gerar_excel_relatorio(
                 dados,
                 descritiva,
                 anova_formatada,
                 pressupostos,
                 tukey_df,
-                interpretacao
+                interpretacao,
+                fig,
+                nome_ensaio
+            )
+
+            pdf_file = gerar_pdf_relatorio(
+                dados,
+                descritiva,
+                anova_formatada,
+                pressupostos,
+                tukey_df,
+                interpretacao,
+                fig,
+                nome_ensaio
             )
 
             png_file = converter_figura_para_png(fig)
-            pdf_file = converter_figura_para_pdf(fig)
 
             st.divider()
             st.subheader("Baixar resultados")
@@ -656,26 +1005,26 @@ else:
 
             with col1:
                 st.download_button(
-                    label="📥 Excel",
+                    label="📥 Excel completo",
                     data=excel_file,
-                    file_name="resultado_anova_tukey.xlsx",
+                    file_name="relatorio_anova_tukey.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
             with col2:
                 st.download_button(
-                    label="📥 PNG (600 dpi)",
-                    data=png_file,
-                    file_name="grafico_tukey.png",
-                    mime="image/png"
+                    label="📄 PDF completo",
+                    data=pdf_file,
+                    file_name="relatorio_anova_tukey.pdf",
+                    mime="application/pdf"
                 )
 
             with col3:
                 st.download_button(
-                    label="📥 PDF",
-                    data=pdf_file,
-                    file_name="grafico_tukey.pdf",
-                    mime="application/pdf"
+                    label="🖼️ Gráfico PNG",
+                    data=png_file,
+                    file_name="grafico_tukey.png",
+                    mime="image/png"
                 )
 
         except Exception as erro:
